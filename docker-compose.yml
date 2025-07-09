@@ -1,10 +1,11 @@
-version: "3.8"
-
 services:
   app:
     build: .
     ports:
       - "8080:8080"
+    environment:
+      - DEFAULT_PROCESSOR_URL=http://processor-default:8080/process
+      - FALLBACK_PROCESSOR_URL=http://processor-fallback:8080/process
     deploy:
       resources:
         limits:

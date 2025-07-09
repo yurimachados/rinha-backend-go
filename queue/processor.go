@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -61,26 +63,39 @@ func NewPaymentProcessor(defaultURL, fallbackURL string) *PaymentProcessor {
 func (p *PaymentProcessor) ProcessPayment(payment *types.PaymentRequest) *types.ProcessorResult {
 	atomic.AddInt64(&p.totalPayments, 1)
 	
+	log.Printf("🔄 Processando payment amount=%d type=%s", payment.Amount, payment.Type)
+	
 	// Tentar processador padrão primeiro se estiver saudável
-	if atomic.LoadInt64(&p.defaultStatus.IsHealthy) == 1 {
+	defaultHealthy := atomic.LoadInt64(&p.defaultStatus.IsHealthy) == 1
+	log.Printf("📊 Default processor healthy: %v", defaultHealthy)
+	
+	if defaultHealthy {
 		result := p.sendToProcessor(p.defaultURL, "default", payment, p.defaultStatus)
 		if result.Success {
 			atomic.AddInt64(&p.defaultSuccess, 1)
+			log.Printf("✅ Default processor SUCCESS")
 			return result
 		}
+		log.Printf("❌ Default processor FAILED: %v", result.Error)
 	}
 	
 	// Fallback para processador secundário
-	if atomic.LoadInt64(&p.fallbackStatus.IsHealthy) == 1 {
+	fallbackHealthy := atomic.LoadInt64(&p.fallbackStatus.IsHealthy) == 1
+	log.Printf("📊 Fallback processor healthy: %v", fallbackHealthy)
+	
+	if fallbackHealthy {
 		result := p.sendToProcessor(p.fallbackURL, "fallback", payment, p.fallbackStatus)
 		if result.Success {
 			atomic.AddInt64(&p.fallbackSuccess, 1)
+			log.Printf("✅ Fallback processor SUCCESS")
 			return result
 		}
+		log.Printf("❌ Fallback processor FAILED: %v", result.Error)
 	}
 	
 	// Ambos falharam
 	atomic.AddInt64(&p.totalErrors, 1)
+	log.Printf("💥 BOTH processors FAILED - payment rejected")
 	return &types.ProcessorResult{
 		Success:     false,
 		ProcessorID: "none",
@@ -102,7 +117,7 @@ func (p *PaymentProcessor) sendToProcessor(url, processorID string, payment *typ
 		}
 	}
 	
-	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 1000*time.Millisecond)
 	defer cancel()
 	
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(payloadBytes))
@@ -226,7 +241,19 @@ func (p *PaymentProcessor) pingProcessor(url string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	
-	req, err := http.NewRequestWithContext(ctx, "GET", url+"/health", nil)
+	// Para URLs de teste (httpbin), usar o próprio endpoint
+	healthURL := url
+	if strings.Contains(url, "httpbin.org") {
+		// Para httpbin, usar GET no mesmo endpoint POST
+		if strings.Contains(url, "/post") {
+			healthURL = strings.Replace(url, "/post", "/get", 1)
+		}
+	} else {
+		// Para processadores reais, usar /health
+		healthURL = url + "/health"
+	}
+	
+	req, err := http.NewRequestWithContext(ctx, "GET", healthURL, nil)
 	if err != nil {
 		return false
 	}

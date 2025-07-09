@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,24 +14,23 @@ import (
 
 // PaymentHandler gerencia endpoints de payments
 type PaymentHandler struct {
-	processor     *queue.PaymentProcessor
-	paymentQueue  chan *types.PaymentRequest
+	processor      *queue.PaymentProcessor
+	workerPool     *queue.WorkerPool
 	requestCounter int64
 }
 
 // NewPaymentHandler cria um novo handler otimizado
 func NewPaymentHandler(defaultURL, fallbackURL string) *PaymentHandler {
 	processor := queue.NewPaymentProcessor(defaultURL, fallbackURL)
+	workerPool := queue.NewWorkerPool(processor, 20000) // fila de 20k para alta carga
 
 	handler := &PaymentHandler{
-		processor:    processor,
-		paymentQueue: make(chan *types.PaymentRequest, 10000), // buffer grande para alta carga
+		processor:  processor,
+		workerPool: workerPool,
 	}
 
-	// Iniciar workers assíncronos
-	for i := 0; i < 50; i++ { // 50 workers paralelos
-		go handler.worker()
-	}
+	// Iniciar pool de workers
+	workerPool.Start()
 
 	return handler
 }
@@ -58,9 +58,8 @@ func (h *PaymentHandler) PostPayments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enfileirar de forma não-bloqueante
-	select {
-	case h.paymentQueue <- &payment:
+	// Enfileirar de forma não-bloqueante usando WorkerPool
+	if h.workerPool.Submit(&payment) {
 		// Sucesso - responder imediatamente
 		requestID := atomic.AddInt64(&h.requestCounter, 1)
 
@@ -75,7 +74,7 @@ func (h *PaymentHandler) PostPayments(w http.ResponseWriter, r *http.Request) {
 
 		json.NewEncoder(w).Encode(response)
 
-	default:
+	} else {
 		// Fila cheia - rejeitar
 		http.Error(w, "Service temporarily unavailable", http.StatusServiceUnavailable)
 	}
@@ -95,18 +94,13 @@ func (h *PaymentHandler) GetPaymentsSummary(w http.ResponseWriter, r *http.Reque
 	json.NewEncoder(w).Encode(summary)
 }
 
-// worker processa payments da fila de forma assíncrona
-func (h *PaymentHandler) worker() {
-	for payment := range h.paymentQueue {
-		// Processar sem bloquear outros workers
-		h.processor.ProcessPayment(payment)
-
-		// Micro-sleep para evitar CPU-bound excessivo
-		time.Sleep(100 * time.Microsecond)
-	}
-}
-
 // StartHealthChecker inicia verificação de saúde dos processadores
 func (h *PaymentHandler) StartHealthChecker() {
-	go h.processor.HealthChecker(nil)
+	ctx := context.Background()
+	go h.processor.HealthChecker(ctx)
+}
+
+// Stop para o handler graciosamente
+func (h *PaymentHandler) Stop() {
+	h.workerPool.Stop()
 }
